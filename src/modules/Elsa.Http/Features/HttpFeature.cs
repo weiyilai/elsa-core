@@ -1,5 +1,4 @@
 using Elsa.Common.Contracts;
-using Elsa.Common.Features;
 using Elsa.Expressions.Options;
 using Elsa.Extensions;
 using Elsa.Features.Abstractions;
@@ -12,6 +11,7 @@ using Elsa.Http.FileCaches;
 using Elsa.Http.Handlers;
 using Elsa.Http.HostedServices;
 using Elsa.Http.Models;
+using Elsa.Http.MultiTenancy;
 using Elsa.Http.Options;
 using Elsa.Http.Parsers;
 using Elsa.Http.PortResolvers;
@@ -21,7 +21,6 @@ using Elsa.Http.UIHints;
 using Elsa.Workflows.Contracts;
 using Elsa.Workflows.Management.Requests;
 using Elsa.Workflows.Management.Responses;
-using Elsa.Workflows.Serialization.Configurators;
 using FluentStorage;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -34,7 +33,7 @@ namespace Elsa.Http.Features;
 /// <summary>
 /// Installs services related to HTTP services and activities.
 /// </summary>
-[DependsOn(typeof(MemoryCacheFeature))]
+[DependsOn(typeof(HttpJavaScriptFeature))]
 public class HttpFeature : FeatureBase
 {
     /// <inheritdoc />
@@ -58,7 +57,7 @@ public class HttpFeature : FeatureBase
     public Func<IServiceProvider, IHttpEndpointAuthorizationHandler> HttpEndpointAuthorizationHandler { get; set; } = sp => sp.GetRequiredService<AuthenticationBasedHttpEndpointAuthorizationHandler>();
 
     /// <summary>
-    /// A delegate that is invoked when an HTTP workflow faults. 
+    /// A delegate that is invoked when an HTTP workflow faults.
     /// </summary>
     public Func<IServiceProvider, IHttpEndpointFaultHandler> HttpEndpointWorkflowFaultHandler { get; set; } = sp => sp.GetRequiredService<DefaultHttpEndpointFaultHandler>();
 
@@ -117,7 +116,9 @@ public class HttpFeature : FeatureBase
                 typeof(HttpResponse),
                 typeof(HttpResponseMessage),
                 typeof(HttpHeaders),
-                typeof(IFormFile)
+                typeof(IFormFile),
+                typeof(HttpFile),
+                typeof(Downloadable)
             }, "HTTP");
 
             management.AddActivitiesFrom<HttpFeature>();
@@ -151,8 +152,8 @@ public class HttpFeature : FeatureBase
             .AddScoped<IRouteMatcher, RouteMatcher>()
             .AddScoped<IRouteTable, RouteTable>()
             .AddScoped<IAbsoluteUrlProvider, DefaultAbsoluteUrlProvider>()
-            .AddScoped<IHttpBookmarkProcessor, HttpBookmarkProcessor>()
             .AddScoped<IRouteTableUpdater, DefaultRouteTableUpdater>()
+            .AddScoped<IHttpWorkflowLookupService, HttpWorkflowLookupService>()
             .AddScoped(ContentTypeProvider)
             .AddHttpContextAccessor()
 
@@ -160,11 +161,13 @@ public class HttpFeature : FeatureBase
             .AddRequestHandler<ValidateWorkflowRequestHandler, ValidateWorkflowRequest, ValidateWorkflowResponse>()
             .AddNotificationHandler<UpdateRouteTable>()
 
-            // Content parsers.            
+            // Content parsers.
             .AddSingleton<IHttpContentParser, JsonHttpContentParser>()
             .AddSingleton<IHttpContentParser, XmlHttpContentParser>()
             .AddSingleton<IHttpContentParser, PlainTextHttpContentParser>()
-            
+            .AddSingleton<IHttpContentParser, TextHtmlHttpContentParser>()
+            .AddSingleton<IHttpContentParser, FileHttpContentParser>()
+
             // HTTP content factories.
             .AddScoped<IHttpContentFactory, TextContentFactory>()
             .AddScoped<IHttpContentFactory, JsonContentFactory>()
@@ -192,6 +195,8 @@ public class HttpFeature : FeatureBase
             .AddScoped<IDownloadableContentHandler, FormFileDownloadableContentHandler>()
             .AddScoped<IDownloadableContentHandler, DownloadableDownloadableContentHandler>()
             .AddScoped<IDownloadableContentHandler, UrlDownloadableContentHandler>()
+            .AddScoped<IDownloadableContentHandler, StringDownloadableContentHandler>()
+            .AddScoped<IDownloadableContentHandler, HttpFileDownloadableContentHandler>()
 
             // File caches.
             .AddScoped(FileCache)
@@ -203,6 +208,10 @@ public class HttpFeature : FeatureBase
 
         // HTTP clients.
         Services.AddHttpClient<IFileDownloader, HttpClientFileDownloader>();
+        
+        // Tenant resolvers.
+        Services.AddScoped<ITenantResolutionStrategy, HttpContextTenantResolver>();
+        Services.AddScoped<ITenantResolutionStrategy, RoutePrefixTenantResolver>();
 
         // Add selectors.
         foreach (var httpCorrelationIdSelectorType in HttpCorrelationIdSelectorTypes)
@@ -215,6 +224,10 @@ public class HttpFeature : FeatureBase
         {
             options.AddTypeAlias<IFormFile>("FormFile");
             options.AddTypeAlias<IFormFile[]>("FormFile[]");
+            options.AddTypeAlias<HttpFile>("HttpFile");
+            options.AddTypeAlias<HttpFile[]>("HttpFile[]");
+            options.AddTypeAlias<Downloadable>("Downloadable");
+            options.AddTypeAlias<Downloadable[]>("Downloadable[]");
         });
     }
 }

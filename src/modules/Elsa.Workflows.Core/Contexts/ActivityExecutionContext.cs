@@ -224,8 +224,7 @@ public partial class ActivityExecutionContext : IExecutionContext
     /// <param name="options">The options used to schedule the activity.</param>
     public async ValueTask ScheduleActivityAsync(IActivity? activity, ScheduleWorkOptions? options = default)
     {
-        var activityNode = activity != null ? WorkflowExecutionContext.FindNodeByActivity(activity) : default;
-        await ScheduleActivityAsync(activityNode, this, options);
+        await ScheduleActivityAsync(activity, this, options);
     }
 
     /// <summary>
@@ -236,7 +235,9 @@ public partial class ActivityExecutionContext : IExecutionContext
     /// <param name="options">The options used to schedule the activity.</param>
     public async ValueTask ScheduleActivityAsync(IActivity? activity, ActivityExecutionContext? owner, ScheduleWorkOptions? options = default)
     {
-        var activityNode = activity != null ? WorkflowExecutionContext.FindNodeByActivity(activity) : default;
+        var activityNode = activity != null
+            ? WorkflowExecutionContext.FindNodeByActivity(activity) ?? throw new InvalidOperationException("The specified activity is not part of the workflow.")
+            : null;
         await ScheduleActivityAsync(activityNode, owner, options);
     }
 
@@ -250,6 +251,10 @@ public partial class ActivityExecutionContext : IExecutionContext
     {
         if (this.GetIsBackgroundExecution())
         {
+            // Validate that the specified activity is part of the workflow.
+            if (activityNode != null && !WorkflowExecutionContext.NodeActivityLookup.ContainsKey(activityNode.Activity))
+                throw new InvalidOperationException("The specified activity is not part of the workflow.");
+
             var scheduledActivity = new ScheduledActivity
             {
                 ActivityNodeId = activityNode?.NodeId,
@@ -339,7 +344,7 @@ public partial class ActivityExecutionContext : IExecutionContext
         foreach (var payload in payloads)
             CreateBookmark(new CreateBookmarkArgs
             {
-                Payload = payload,
+                Stimulus = payload,
                 Callback = callback,
                 IncludeActivityInstanceId = includeActivityInstanceId
             });
@@ -375,16 +380,16 @@ public partial class ActivityExecutionContext : IExecutionContext
     /// <summary>
     /// Creates a bookmark so that this activity can be resumed at a later time.
     /// </summary>
-    /// <param name="payload">The payload to associate with the bookmark.</param>
+    /// <param name="stimulus">The payload to associate with the bookmark.</param>
     /// <param name="callback">An optional callback that is invoked when the bookmark is resumed.</param>
     /// <param name="includeActivityInstanceId">Whether or not the activity instance ID should be included in the bookmark payload.</param>
     /// <param name="customProperties">Custom properties to associate with the bookmark.</param>
     /// <returns>The created bookmark.</returns>
-    public Bookmark CreateBookmark(object payload, ExecuteActivityDelegate callback, bool includeActivityInstanceId = true, IDictionary<string, string>? customProperties = default)
+    public Bookmark CreateBookmark(object stimulus, ExecuteActivityDelegate callback, bool includeActivityInstanceId = true, IDictionary<string, string>? customProperties = default)
     {
         return CreateBookmark(new CreateBookmarkArgs
         {
-            Payload = payload,
+            Stimulus = stimulus,
             Callback = callback,
             IncludeActivityInstanceId = includeActivityInstanceId,
             Metadata = customProperties
@@ -394,15 +399,15 @@ public partial class ActivityExecutionContext : IExecutionContext
     /// <summary>
     /// Creates a bookmark for the current activity execution context.
     /// </summary>
-    /// <param name="payload">The payload to associate with the bookmark.</param>
+    /// <param name="stimulus">The payload to associate with the bookmark.</param>
     /// <param name="includeActivityInstanceId">Specifies whether to include the activity instance ID in the bookmark information. Defaults to true.</param>
     /// <param name="customProperties">Additional custom properties to associate with the bookmark. Defaults to null.</param>
     /// <returns>The created bookmark.</returns>
-    public Bookmark CreateBookmark(object payload, bool includeActivityInstanceId, IDictionary<string, string>? customProperties = default)
+    public Bookmark CreateBookmark(object stimulus, bool includeActivityInstanceId, IDictionary<string, string>? customProperties = default)
     {
         return CreateBookmark(new CreateBookmarkArgs
         {
-            Payload = payload,
+            Stimulus = stimulus,
             IncludeActivityInstanceId = includeActivityInstanceId,
             Metadata = customProperties
         });
@@ -411,14 +416,14 @@ public partial class ActivityExecutionContext : IExecutionContext
     /// <summary>
     /// Creates a bookmark so that this activity can be resumed at a later time. 
     /// </summary>
-    /// <param name="payload">The payload to associate with the bookmark.</param>
+    /// <param name="stimulus">The payload to associate with the bookmark.</param>
     /// <param name="metadata">Custom properties to associate with the bookmark.</param>
     /// <returns>The created bookmark.</returns>
-    public Bookmark CreateBookmark(object payload, IDictionary<string, string>? metadata = default)
+    public Bookmark CreateBookmark(object stimulus, IDictionary<string, string>? metadata = default)
     {
         return CreateBookmark(new CreateBookmarkArgs
         {
-            Payload = payload,
+            Stimulus = stimulus,
             Metadata = metadata
         });
     }
@@ -429,10 +434,10 @@ public partial class ActivityExecutionContext : IExecutionContext
     /// </summary>
     public Bookmark CreateBookmark(CreateBookmarkArgs? options = default)
     {
-        var payload = options?.Payload;
+        var payload = options?.Stimulus;
         var callback = options?.Callback;
         var bookmarkName = options?.BookmarkName ?? Activity.Type;
-        var bookmarkHasher = GetRequiredService<IBookmarkHasher>();
+        var bookmarkHasher = GetRequiredService<IStimulusHasher>();
         var identityGenerator = GetRequiredService<IIdentityGenerator>();
         var includeActivityInstanceId = options?.IncludeActivityInstanceId ?? true;
         var hash = bookmarkHasher.Hash(bookmarkName, payload, includeActivityInstanceId ? Id : null);

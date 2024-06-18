@@ -1,6 +1,5 @@
 using Elsa.Workflows.Activities;
 using Elsa.Workflows.Contracts;
-using Elsa.Workflows.Management.Contracts;
 using Elsa.Workflows.Management.Entities;
 using Elsa.Workflows.Management.Models;
 using Elsa.Workflows.Models;
@@ -36,7 +35,7 @@ public class WorkflowDefinitionMapper
         var root = _activitySerializer.Deserialize(source.StringData!);
 
         return new(
-            new WorkflowIdentity(source.DefinitionId, source.Version, source.Id),
+            new WorkflowIdentity(source.DefinitionId, source.Version, source.Id, source.TenantId),
             new WorkflowPublication(source.IsLatest, source.IsPublished),
             new WorkflowMetadata(source.Name, source.Description, source.CreatedAt, source.ToolVersion),
             source.Options,
@@ -62,13 +61,13 @@ public class WorkflowDefinitionMapper
         var options = source.Options ?? new WorkflowOptions();
 
         // TODO: Remove this in the future when users have migrated workflows to use the new UsableAsActivity options property.
-        
+
 #pragma warning disable CS0618
         options.UsableAsActivity ??= source.UsableAsActivity ?? false;
 #pragma warning restore CS0618
 
         return new(
-            new WorkflowIdentity(source.DefinitionId, source.Version, source.Id),
+            new WorkflowIdentity(source.DefinitionId, source.Version, source.Id, source.TenantId),
             new WorkflowPublication(source.IsLatest, source.IsPublished),
             new WorkflowMetadata(source.Name, source.Description, source.CreatedAt, source.ToolVersion),
             options,
@@ -88,7 +87,7 @@ public class WorkflowDefinitionMapper
     /// <param name="source">The source <see cref="WorkflowDefinition"/>s.</param>
     /// <param name="cancellationToken">An optional cancellation token.</param>
     /// <returns>The mapped <see cref="WorkflowDefinitionModel"/>s.</returns>
-    public async Task<IEnumerable<WorkflowDefinitionModel>> MapAsync(IEnumerable<WorkflowDefinition> source, CancellationToken cancellationToken = default) => 
+    public async Task<IEnumerable<WorkflowDefinitionModel>> MapAsync(IEnumerable<WorkflowDefinition> source, CancellationToken cancellationToken = default) =>
         await Task.WhenAll(source.Select(async x => await MapAsync(x, cancellationToken)));
 
     /// <summary>
@@ -99,12 +98,14 @@ public class WorkflowDefinitionMapper
     /// <returns>The mapped <see cref="Workflow"/>.</returns>
     public async Task<WorkflowDefinitionModel> MapAsync(WorkflowDefinition workflowDefinition, CancellationToken cancellationToken = default)
     {
-        var workflow = await _workflowDefinitionService.MaterializeWorkflowAsync(workflowDefinition, cancellationToken);
+        var workflowGraph = await _workflowDefinitionService.MaterializeWorkflowAsync(workflowDefinition, cancellationToken);
+        var workflow = workflowGraph.Workflow;
         var variables = _variableDefinitionMapper.Map(workflow.Variables).ToList();
 
         return new(
             workflowDefinition.Id,
             workflowDefinition.DefinitionId,
+            workflowDefinition.TenantId,
             workflowDefinition.Name,
             workflowDefinition.Description,
             workflowDefinition.CreatedAt,
@@ -120,10 +121,10 @@ public class WorkflowDefinitionMapper
             workflowDefinition.IsLatest,
             workflowDefinition.IsPublished,
             workflow.Options,
-            default,
+            null,
             workflow.Root);
     }
-    
+
     /// <summary>
     /// Maps a <see cref="Workflow"/> to a <see cref="WorkflowDefinitionModel"/>.
     /// </summary>
@@ -136,6 +137,7 @@ public class WorkflowDefinitionMapper
         return new(
             workflow.Identity.Id,
             workflow.Identity.DefinitionId,
+            workflow.Identity.TenantId,
             workflow.WorkflowMetadata.Name,
             workflow.WorkflowMetadata.Description,
             workflow.WorkflowMetadata.CreatedAt,
@@ -151,7 +153,7 @@ public class WorkflowDefinitionMapper
             workflow.Publication.IsLatest,
             workflow.Publication.IsPublished,
             workflow.Options,
-            default,
+            null,
             workflow.Root);
     }
 }

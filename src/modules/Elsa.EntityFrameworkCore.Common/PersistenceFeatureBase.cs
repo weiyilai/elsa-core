@@ -1,5 +1,6 @@
 using Elsa.Common.Entities;
 using Elsa.Features.Abstractions;
+using Elsa.Features.Attributes;
 using Elsa.Features.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -10,7 +11,9 @@ namespace Elsa.EntityFrameworkCore.Common;
 /// Base class for features that require Entity Framework Core.
 /// </summary>
 /// <typeparam name="TDbContext">The type of the database context.</typeparam>
-public abstract class PersistenceFeatureBase<TDbContext> : FeatureBase where TDbContext : DbContext
+/// <typeparam name="TFeature">The type of the feature.</typeparam>
+[DependsOn(typeof(CommonPersistenceFeature))]
+public abstract class PersistenceFeatureBase<TFeature, TDbContext> : FeatureBase where TDbContext : ElsaDbContextBase
 {
     /// <inheritdoc />
     protected PersistenceFeatureBase(IModule module) : base(module)
@@ -62,7 +65,7 @@ public abstract class PersistenceFeatureBase<TDbContext> : FeatureBase where TDb
     /// </summary>
     /// <typeparam name="TEntity">The type of the entity.</typeparam>
     /// <typeparam name="TStore">The type of the store.</typeparam>
-    protected void AddStore<TEntity, TStore>() where TEntity : class where TStore : class
+    protected void AddStore<TEntity, TStore>() where TEntity : class, new() where TStore : class
     {
         Services
             .AddScoped<Store<TDbContext, TEntity>>()
@@ -75,7 +78,7 @@ public abstract class PersistenceFeatureBase<TDbContext> : FeatureBase where TDb
     /// </summary>
     /// <typeparam name="TEntity">The type of the entity.</typeparam>
     /// <typeparam name="TStore">The type of the store.</typeparam>
-    protected void AddEntityStore<TEntity, TStore>() where TEntity : Entity where TStore : class
+    protected void AddEntityStore<TEntity, TStore>() where TEntity : Entity, new() where TStore : class
     {
         Services
             .AddScoped<EntityStore<TDbContext, TEntity>>()

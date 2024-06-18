@@ -1,12 +1,15 @@
 using Elsa.EntityFrameworkCore.Common;
 using Elsa.Workflows.Contracts;
+using Elsa.Workflows.Runtime;
 using Elsa.Workflows.Runtime.Contracts;
 using Elsa.Workflows.Runtime.Entities;
 using Elsa.Workflows.Runtime.Filters;
+using JetBrains.Annotations;
 
 namespace Elsa.EntityFrameworkCore.Modules.Runtime;
 
 /// <inheritdoc />
+[UsedImplicitly]
 public class EFCoreTriggerStore : ITriggerStore
 {
     private readonly EntityStore<RuntimeElsaDbContext, StoredTrigger> _store;
@@ -22,10 +25,22 @@ public class EFCoreTriggerStore : ITriggerStore
     }
 
     /// <inheritdoc />
-    public async ValueTask SaveAsync(StoredTrigger record, CancellationToken cancellationToken = default) => await _store.SaveAsync(record, OnSaveAsync, cancellationToken);
+    public async ValueTask SaveAsync(StoredTrigger record, CancellationToken cancellationToken = default)
+    {
+        await _store.SaveAsync(record, OnSaveAsync, cancellationToken);
+    }
 
     /// <inheritdoc />
-    public async ValueTask SaveManyAsync(IEnumerable<StoredTrigger> records, CancellationToken cancellationToken = default) => await _store.SaveManyAsync(records, OnSaveAsync, cancellationToken);
+    public async ValueTask SaveManyAsync(IEnumerable<StoredTrigger> records, CancellationToken cancellationToken = default)
+    {
+        await _store.SaveManyAsync(records, OnSaveAsync, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<StoredTrigger?> FindAsync(TriggerFilter filter, CancellationToken cancellationToken = default)
+    {
+        return await _store.FindAsync(filter.Apply, OnLoadAsync, cancellationToken);
+    }
 
     /// <inheritdoc />
     public async ValueTask<IEnumerable<StoredTrigger>> FindManyAsync(TriggerFilter filter, CancellationToken cancellationToken = default) => await _store.QueryAsync(filter.Apply, OnLoadAsync, cancellationToken);
@@ -39,9 +54,11 @@ public class EFCoreTriggerStore : ITriggerStore
     }
 
     /// <inheritdoc />
-    public async ValueTask<long> DeleteManyAsync(TriggerFilter filter, CancellationToken cancellationToken = default) =>
-        await _store.DeleteWhereAsync(filter.Apply, cancellationToken);
-    
+    public async ValueTask<long> DeleteManyAsync(TriggerFilter filter, CancellationToken cancellationToken = default)
+    {
+        return await _store.DeleteWhereAsync(filter.Apply, cancellationToken);
+    }
+
     private ValueTask OnSaveAsync(RuntimeElsaDbContext dbContext, StoredTrigger entity, CancellationToken cancellationToken)
     {
         dbContext.Entry(entity).Property("SerializedPayload").CurrentValue = entity.Payload != null ? _serializer.Serialize(entity.Payload) : default;
@@ -55,7 +72,7 @@ public class EFCoreTriggerStore : ITriggerStore
 
         var json = dbContext.Entry(entity).Property<string>("SerializedPayload").CurrentValue;
         entity.Payload = !string.IsNullOrEmpty(json) ? _serializer.Deserialize(json) : null;
-        
+
         return ValueTask.CompletedTask;
     }
 }

@@ -1,48 +1,27 @@
-using Elsa.Alterations.Core.Contexts;
 using Elsa.Alterations.Core.Contracts;
 using Elsa.Alterations.Core.Models;
 using Elsa.Alterations.Core.Results;
 using Elsa.Alterations.Middleware.Workflows;
 using Elsa.Common.Contracts;
-using Elsa.Extensions;
 using Elsa.Workflows;
 using Elsa.Workflows.Contracts;
-using Elsa.Workflows.Management.Contracts;
+using Elsa.Workflows.Management;
 using Elsa.Workflows.Pipelines.WorkflowExecution;
-using Elsa.Workflows.Runtime.Contracts;
+using Elsa.Workflows.Runtime;
 using Microsoft.Extensions.Logging;
 
 namespace Elsa.Alterations.Services;
 
 /// <inheritdoc />
-public class DefaultAlterationRunner : IAlterationRunner
+public class DefaultAlterationRunner(
+    IWorkflowRuntime workflowRuntime,
+    IWorkflowExecutionPipeline workflowExecutionPipeline,
+    IWorkflowDefinitionService workflowDefinitionService,
+    IWorkflowStateExtractor workflowStateExtractor,
+    ISystemClock systemClock,
+    IServiceProvider serviceProvider)
+    : IAlterationRunner
 {
-    private readonly IWorkflowRuntime _workflowRuntime;
-    private readonly IWorkflowExecutionPipeline _workflowExecutionPipeline;
-    private readonly IWorkflowDefinitionService _workflowDefinitionService;
-    private readonly IWorkflowStateExtractor _workflowStateExtractor;
-    private readonly ISystemClock _systemClock;
-    private readonly IServiceProvider _serviceProvider;
-
-    /// <summary>
-    /// Initializes a new instance of the <see cref="DefaultAlterationRunner"/> class.
-    /// </summary>
-    public DefaultAlterationRunner(
-        IWorkflowRuntime workflowRuntime,
-        IWorkflowExecutionPipeline workflowExecutionPipeline,
-        IWorkflowDefinitionService workflowDefinitionService,
-        IWorkflowStateExtractor workflowStateExtractor,
-        ISystemClock systemClock,
-        IServiceProvider serviceProvider)
-    {
-        _workflowRuntime = workflowRuntime;
-        _workflowExecutionPipeline = workflowExecutionPipeline;
-        _workflowDefinitionService = workflowDefinitionService;
-        _workflowStateExtractor = workflowStateExtractor;
-        _systemClock = systemClock;
-        _serviceProvider = serviceProvider;
-    }
-
     /// <inheritdoc />
     public async Task<ICollection<RunAlterationsResult>> RunAsync(IEnumerable<string> workflowInstanceIds, IEnumerable<IAlteration> alterations, CancellationToken cancellationToken = default)
     {
@@ -61,13 +40,13 @@ public class DefaultAlterationRunner : IAlterationRunner
     /// <inheritdoc />
     public async Task<RunAlterationsResult> RunAsync(string workflowInstanceId, IEnumerable<IAlteration> alterations, CancellationToken cancellationToken = default)
     {
-        var log = new AlterationLog(_systemClock);
+        var log = new AlterationLog(systemClock);
         var result = new RunAlterationsResult(workflowInstanceId, log);
+        var workflowClient = await workflowRuntime.CreateClientAsync(workflowInstanceId, cancellationToken: cancellationToken);
 
         // Load workflow instance.
-        var workflowState = await _workflowRuntime.ExportWorkflowStateAsync(workflowInstanceId, cancellationToken);
+        var workflowState = await workflowClient.ExportStateAsync(cancellationToken);
 
-        // If the workflow instance is not found, log an error and continue.
         if (workflowState == null)
         {
             log.Add($"Workflow instance with ID '{workflowInstanceId}' not found.", LogLevel.Error);
@@ -75,26 +54,22 @@ public class DefaultAlterationRunner : IAlterationRunner
         }
 
         // Load workflow definition.
-        var workflowDefinition = await _workflowDefinitionService.FindAsync(workflowState.DefinitionVersionId, cancellationToken);
+        var workflowGraph = await workflowDefinitionService.FindWorkflowGraphAsync(workflowState.DefinitionVersionId, cancellationToken);
 
-        // If the workflow definition is not found, log an error and continue.
-        if (workflowDefinition == null)
+        if (workflowGraph == null)
         {
             log.Add($"Workflow definition with ID '{workflowState.DefinitionVersionId}' not found.", LogLevel.Error);
             return result;
         }
 
-        // Materialize workflow.
-        var workflow = await _workflowDefinitionService.MaterializeWorkflowAsync(workflowDefinition, cancellationToken);
-
         // Create workflow execution context.
-        var workflowExecutionContext = await WorkflowExecutionContext.CreateAsync(_serviceProvider, workflow, workflowState, cancellationTokens: cancellationToken);
+        var workflowExecutionContext = await WorkflowExecutionContext.CreateAsync(serviceProvider, workflowGraph, workflowState, cancellationToken: cancellationToken);
         workflowExecutionContext.TransientProperties.Add(RunAlterationsMiddleware.AlterationsPropertyKey, alterations);
         workflowExecutionContext.TransientProperties.Add(RunAlterationsMiddleware.AlterationsLogPropertyKey, log);
 
         // Build a new workflow execution pipeline.
-        var pipelineBuilder = new WorkflowExecutionPipelineBuilder(_serviceProvider);
-        _workflowExecutionPipeline.ConfigurePipelineBuilder(pipelineBuilder);
+        var pipelineBuilder = new WorkflowExecutionPipelineBuilder(serviceProvider);
+        workflowExecutionPipeline.ConfigurePipelineBuilder(pipelineBuilder);
 
         // Replace the terminal DefaultActivitySchedulerMiddleware with the RunAlterationsMiddleware terminal.
         pipelineBuilder.ReplaceTerminal<RunAlterationsMiddleware>();
@@ -106,10 +81,10 @@ public class DefaultAlterationRunner : IAlterationRunner
         await pipeline(workflowExecutionContext);
 
         // Extract workflow state.
-        workflowState = _workflowStateExtractor.Extract(workflowExecutionContext);
+        workflowState = workflowStateExtractor.Extract(workflowExecutionContext);
 
         // Apply updated workflow state.
-        await _workflowRuntime.ImportWorkflowStateAsync(workflowState, cancellationToken);
+        await workflowClient.ImportStateAsync(workflowState, cancellationToken);
 
         // Check if the workflow has scheduled work.
         result.WorkflowHasScheduledWork = workflowExecutionContext.Scheduler.HasAny;

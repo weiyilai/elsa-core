@@ -36,11 +36,13 @@ public class MassTransitFeature : FeatureBase
     [Obsolete("PrefetchCount has been moved to be included in MassTransitOptions")]
     public int? PrefetchCount { get; set; }
 
+    public bool DisableConsumers { get; set; }
+
     /// <summary>
     /// A delegate that can be set to configure MassTransit's <see cref="IBusRegistrationConfigurator"/>. Used by transport-level features such as AzureServiceBusFeature and RabbitMqServiceBusFeature. 
     /// </summary>
     public Action<IBusRegistrationConfigurator>? BusConfigurator { get; set; }
-    
+
     /// <summary>
     /// A factory that creates a <see cref="IEndpointChannelFormatter"/>.
     /// </summary>
@@ -114,13 +116,17 @@ public class MassTransitFeature : FeatureBase
             options.WaitUntilStarted = true;
         });
     }
-    
+
     private void ConfigureInMemoryTransport(IBusRegistrationConfigurator configure)
     {
         var consumers = this.GetConsumers().ToList();
         var temporaryConsumers = consumers
             .Where(c => c.IsTemporary)
             .ToList();
+
+        // Consumers need to be added before the UsingInMemory statement to prevent exceptions.
+        foreach (var consumer in temporaryConsumers)
+            configure.AddConsumer(consumer.ConsumerType).ExcludeFromConfigureEndpoints();
 
         configure.UsingInMemory((context, busFactoryConfigurator) =>
         {
@@ -131,12 +137,18 @@ public class MassTransitFeature : FeatureBase
                 busFactoryConfigurator.ReceiveEndpoint(consumer.Name!, endpoint =>
                 {
                     endpoint.ConcurrentMessageLimit = options.ConcurrentMessageLimit;
-                    endpoint.ConfigureConsumer<DispatchCancelWorkflowsRequestConsumer>(context);
+                    endpoint.ConfigureConsumer(context, consumer.ConsumerType);
                 });
             }
 
-            busFactoryConfigurator.SetupWorkflowDispatcherEndpoints(context);
+            if (!DisableConsumers)
+            {
+                if (Module.HasFeature<MassTransitWorkflowDispatcherFeature>())
+                    busFactoryConfigurator.SetupWorkflowDispatcherEndpoints(context);
+            }
+
             busFactoryConfigurator.ConfigureEndpoints(context, new KebabCaseEndpointNameFormatter("Elsa", false));
+
             busFactoryConfigurator.ConfigureJsonSerializerOptions(serializerOptions =>
             {
                 var serializer = context.GetRequiredService<IJsonSerializer>();

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Elsa.Features.Abstractions;
 using Elsa.Features.Services;
+using Elsa.KeyValues.Entities;
 using Elsa.MongoDb.Options;
 using Elsa.MongoDb.Serializers;
 using Elsa.Workflows.Memory;
@@ -59,10 +60,13 @@ public class MongoDbFeature : FeatureBase
     {
         BsonClassMap.TryRegisterClassMap<StoredBookmark>(cm =>
         {
-            cm.AutoMap(); // Automatically map other properties
-            cm
-                .MapIdProperty(b => b.BookmarkId)
-                .SetSerializer(new StringSerializer(BsonType.String));
+            cm.AutoMap(); // Automatically map other properties;
+        });
+
+        BsonClassMap.RegisterClassMap<SerializedKeyValuePair>(map =>
+        {
+            map.AutoMap();
+            map.SetIgnoreExtraElements(true); // Needed for missing ID property
         });
     }
 

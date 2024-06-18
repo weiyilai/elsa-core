@@ -6,6 +6,7 @@ using Elsa.Workflows;
 using Elsa.Workflows.Attributes;
 using Elsa.Workflows.UIHints;
 using Elsa.Workflows.Models;
+using Microsoft.Extensions.Logging;
 using HttpHeaders = Elsa.Http.Models.HttpHeaders;
 
 namespace Elsa.Http;
@@ -32,7 +33,10 @@ public abstract class SendHttpRequestBase : Activity<HttpResponseMessage>
     /// </summary>
     [Input(
         Description = "The HTTP method to use when sending the request.",
-        Options = new[] { "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD" },
+        Options = new[]
+        {
+            "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"
+        },
         DefaultValue = "GET",
         UIHint = InputUIHints.DropDown
     )]
@@ -82,7 +86,7 @@ public abstract class SendHttpRequestBase : Activity<HttpResponseMessage>
     /// </summary>
     [Output(Description = "The HTTP response status code")]
     public Output<int> StatusCode { get; set; } = default!;
-    
+
     /// <summary>
     /// The parsed content, if any.
     /// </summary>
@@ -119,6 +123,7 @@ public abstract class SendHttpRequestBase : Activity<HttpResponseMessage>
     private async Task TrySendAsync(ActivityExecutionContext context)
     {
         var request = PrepareRequest(context);
+        var logger = (ILogger)context.GetRequiredService(typeof(ILogger<>).MakeGenericType(GetType()));
         var httpClientFactory = context.GetRequiredService<IHttpClientFactory>();
         var httpClient = httpClientFactory.CreateClient(nameof(SendHttpRequestBase));
         var cancellationToken = context.CancellationToken;
@@ -126,10 +131,10 @@ public abstract class SendHttpRequestBase : Activity<HttpResponseMessage>
         try
         {
             var response = await httpClient.SendAsync(request, cancellationToken);
-            var parsedContent = await ParseContentAsync(context, response.Content);
+            var parsedContent = await ParseContentAsync(context, response);
             var statusCode = (int)response.StatusCode;
             var responseHeaders = new HttpHeaders(response.Headers);
-            
+
             context.Set(Result, response);
             context.Set(ParsedContent, parsedContent);
             context.Set(StatusCode, statusCode);
@@ -139,27 +144,38 @@ public abstract class SendHttpRequestBase : Activity<HttpResponseMessage>
         }
         catch (HttpRequestException e)
         {
-            context.AddExecutionLogEntry("Error", e.Message, payload: new { StackTrace = e.StackTrace });
+            logger.LogWarning(e, "An error occurred while sending an HTTP request");
+            context.AddExecutionLogEntry("Error", e.Message, payload: new
+            {
+                StackTrace = e.StackTrace
+            });
             context.JournalData.Add("Error", e.Message);
             await HandleRequestExceptionAsync(context, e);
         }
         catch (TaskCanceledException e)
         {
-            context.AddExecutionLogEntry("Error", e.Message, payload: new { StackTrace = e.StackTrace });
+            logger.LogWarning(e, "An error occurred while sending an HTTP request");
+            context.AddExecutionLogEntry("Error", e.Message, payload: new
+            {
+                StackTrace = e.StackTrace
+            });
             context.JournalData.Add("Cancelled", true);
             await HandleTaskCanceledExceptionAsync(context, e);
         }
     }
 
-    private async Task<object?> ParseContentAsync(ActivityExecutionContext context, HttpContent httpContent)
+    private async Task<object?> ParseContentAsync(ActivityExecutionContext context, HttpResponseMessage httpResponse)
     {
+        var httpContent = httpResponse.Content;
         if (!HasContent(httpContent))
             return null;
 
         var cancellationToken = context.CancellationToken;
         var targetType = ParsedContent.GetTargetType(context);
         var contentStream = await httpContent.ReadAsStreamAsync(cancellationToken);
-        var contentType = httpContent.Headers.ContentType?.MediaType!;
+        var responseHeaders = httpResponse.Headers;
+        var contentHeaders = httpContent.Headers;
+        var contentType = contentHeaders.ContentType?.MediaType!;
 
         targetType ??= contentType switch
         {
@@ -167,7 +183,10 @@ public abstract class SendHttpRequestBase : Activity<HttpResponseMessage>
             _ => typeof(string)
         };
 
-        return await context.ParseContentAsync(contentStream, contentType, targetType, cancellationToken);
+        var contentHeadersDictionary = contentHeaders.ToDictionary(x => x.Key, x => x.Value.Cast<string?>().ToArray(), StringComparer.OrdinalIgnoreCase);
+        var responseHeadersDictionary = responseHeaders.ToDictionary(x => x.Key, x => x.Value.Cast<string?>().ToArray(), StringComparer.OrdinalIgnoreCase);
+        var headersDictionary = contentHeadersDictionary.Concat(responseHeadersDictionary).ToDictionary(x => x.Key, x => x.Value, StringComparer.OrdinalIgnoreCase);
+        return await context.ParseContentAsync(contentStream, contentType, targetType, headersDictionary, cancellationToken);
     }
 
     private static bool HasContent(HttpContent httpContent) => httpContent.Headers.ContentLength > 0;
