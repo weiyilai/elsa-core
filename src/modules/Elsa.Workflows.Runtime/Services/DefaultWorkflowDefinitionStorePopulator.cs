@@ -56,7 +56,7 @@ public class DefaultWorkflowDefinitionStorePopulator : IWorkflowDefinitionStoreP
     {
         var providers = _workflowDefinitionProviders();
         var workflowDefinitions = new List<WorkflowDefinition>();
-        
+
         foreach (var provider in providers)
         {
             var results = await provider.GetWorkflowsAsync(cancellationToken).AsTask().ToList();
@@ -83,8 +83,8 @@ public class DefaultWorkflowDefinitionStorePopulator : IWorkflowDefinitionStoreP
         await AssignIdentities(materializedWorkflow.Workflow, cancellationToken);
         var workflowDefinition = await AddOrUpdateAsync(materializedWorkflow, cancellationToken);
 
-        if (indexTriggers)
-            await IndexTriggersAsync(materializedWorkflow, cancellationToken);
+        if (indexTriggers && workflowDefinition.IsPublished)
+            await _triggerIndexer.IndexTriggersAsync(workflowDefinition, cancellationToken);
 
         return workflowDefinition;
     }
@@ -118,7 +118,7 @@ public class DefaultWorkflowDefinitionStorePopulator : IWorkflowDefinitionStoreP
 
         // Serialize materializer context.
         var materializerContext = materializedWorkflow.MaterializerContext;
-        var materializerContextJson = materializerContext != null ? _payloadSerializer.Serialize(materializerContext) : default;
+        var materializerContextJson = materializerContext != null ? _payloadSerializer.Serialize(materializerContext) : null;
 
         // Serialize the workflow root.
         var workflowJson = _activitySerializer.Serialize(workflow.Root);
@@ -259,8 +259,6 @@ public class DefaultWorkflowDefinitionStorePopulator : IWorkflowDefinitionStoreP
             }
         }
     }
-
-    private async Task IndexTriggersAsync(MaterializedWorkflow materializedWorkflow, CancellationToken cancellationToken) => await _triggerIndexer.IndexTriggersAsync(materializedWorkflow.Workflow, cancellationToken);
 
     /// <summary>
     /// Syncs the items in the primary list with existing items in the secondary list, even when the object instances are not the same (but their IDs are).
