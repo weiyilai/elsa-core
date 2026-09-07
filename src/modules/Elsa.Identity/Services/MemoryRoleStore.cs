@@ -9,7 +9,7 @@ namespace Elsa.Identity.Services;
 /// <summary>
 /// Represents an in-memory role store.
 /// </summary>
-public class MemoryRoleStore : IRoleStore
+public class MemoryRoleStore : IRoleStore, IRoleStoreWithAtomicDelete
 {
     private readonly MemoryStore<Role> _store;
     private readonly ITenantAccessor _tenantAccessor;
@@ -36,6 +36,20 @@ public class MemoryRoleStore : IRoleStore
         var roles = _store.Query(query => Filter(query, filter)).ToList();
         _store.DeleteMany(roles, GetStorageKey);
         return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// The matching role's key is removed through the underlying concurrent dictionary, whose removal is a single
+    /// compare-and-remove step. Two callers racing on the same role ID therefore see one <see langword="true"/> and
+    /// one <see langword="false"/>, rather than both concluding they deleted it.
+    /// </remarks>
+    public Task<bool> TryDeleteAsync(string roleId, CancellationToken cancellationToken = default)
+    {
+        var role = _store.Query(query => Filter(query, new RoleFilter { Id = roleId })).FirstOrDefault();
+        var deleted = role is not null && _store.Delete(GetStorageKey(role));
+
+        return Task.FromResult(deleted);
     }
 
     /// <inheritdoc />

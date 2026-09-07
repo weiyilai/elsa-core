@@ -5,8 +5,11 @@ using Elsa.Common.Services;
 using Elsa.Identity.Contracts;
 using Elsa.Identity.Entities;
 using Elsa.Identity.Models;
+using Elsa.Identity.Notifications;
 using Elsa.Identity.Providers;
 using Elsa.Identity.Services;
+using Elsa.Mediator.Contracts;
+using NSubstitute;
 
 namespace Elsa.Identity.UnitTests.Services;
 
@@ -78,15 +81,91 @@ public class RoleDeletionCoordinatorTests
     [Fact]
     public async Task OrdinaryDeletionIsBlockedByConfigurationDependency()
     {
+        var notificationSender = Substitute.For<INotificationSender>();
         var (store, coordinator) = await CreateCoordinatorAsync(
             new StubContributor([
                 Dependency("configuration", RoleDeletionDependencyOwnership.Configuration, configurationPath: "ExternalAuthentication:Connections:0:UnlinkedPolicy:Settings:defaultRoleIds:0")
-            ]));
+            ]),
+            notificationSender);
 
         var result = await coordinator.DeleteAsync("workflow-user", Administrator());
 
         Assert.IsType<RoleDeletionOperationResult.Blocked>(result);
         Assert.NotNull(await store.FindAsync(new() { Id = "workflow-user" }));
+        await AssertNoRoleNotificationAsync(notificationSender);
+    }
+
+    [Fact]
+    public async Task SuccessfulDeletionPublishesDeletedRoleNotification()
+    {
+        var notificationSender = Substitute.For<INotificationSender>();
+        var (store, coordinator) = await CreateCoordinatorAsync(new StubContributor([]), notificationSender);
+        // A cancellable request token is what makes the token assertion below mean anything: were the notification
+        // published with the request's own token, that token could be cancelled and the assertion would fail.
+        using var request = new CancellationTokenSource();
+
+        var result = await coordinator.DeleteAsync("workflow-user", Administrator(), request.Token);
+
+        Assert.IsType<RoleDeletionOperationResult.Deleted>(result);
+        Assert.Null(await store.FindAsync(new() { Id = "workflow-user" }));
+        await AssertRoleDeletedNotificationAsync(notificationSender);
+    }
+
+    [Fact]
+    public async Task DeletionThatRemovedNothingReportsNotFoundWithoutPublishing()
+    {
+        // What the loser of a race sees: the role is still there to be found, and the delete then removes no row
+        // because a concurrent request got there first. Publishing here would credit this request with a deletion
+        // it did not perform, and audit would record the role as deleted twice.
+        var notificationSender = Substitute.For<INotificationSender>();
+        var (_, coordinator) = await CreateCoordinatorAsync(
+            new StubContributor([]),
+            notificationSender,
+            inner => new RoleStoreThatDeletesNothing(inner));
+
+        var result = await coordinator.DeleteAsync("workflow-user", Administrator());
+
+        Assert.IsType<RoleDeletionOperationResult.NotFound>(result);
+        await AssertNoRoleNotificationAsync(notificationSender);
+    }
+
+    [Fact]
+    public async Task DeletionThroughStoreWithoutAtomicCapabilityStillPublishesOnce()
+    {
+        // A third-party store implementing only IRoleStore reports no affected-row count. The deletion must still
+        // reach security subscribers over that legacy path rather than being dropped for want of the capability.
+        var notificationSender = Substitute.For<INotificationSender>();
+        var (store, coordinator) = await CreateCoordinatorAsync(
+            new StubContributor([]),
+            notificationSender,
+            inner => new LegacyRoleStore(inner));
+
+        var result = await coordinator.DeleteAsync("workflow-user", Administrator());
+
+        Assert.IsType<RoleDeletionOperationResult.Deleted>(result);
+        Assert.Null(await store.FindAsync(new() { Id = "workflow-user" }));
+        await AssertRoleDeletedNotificationAsync(notificationSender);
+    }
+
+    [Fact]
+    public async Task ConcurrentDeletionsPublishExactlyOneNotification()
+    {
+        // Both requests are held until each has already found the role, so neither can be turned away by the
+        // existence check and the store's own delete is the only thing that can separate them.
+        var notificationSender = Substitute.For<INotificationSender>();
+        var (store, coordinator) = await CreateCoordinatorAsync(
+            new StubContributor([]),
+            notificationSender,
+            inner => new RoleStoreThatDeletesInLockstep(inner, 2));
+
+        var results = await Task.WhenAll(
+            Task.Run(async () => await coordinator.DeleteAsync("workflow-user", Administrator())),
+            Task.Run(async () => await coordinator.DeleteAsync("workflow-user", Administrator())));
+
+        Assert.Single(results, result => result is RoleDeletionOperationResult.Deleted);
+        Assert.Single(results, result => result is RoleDeletionOperationResult.NotFound);
+        Assert.Null(await store.FindAsync(new() { Id = "workflow-user" }));
+        await AssertRoleDeletedNotificationAsync(notificationSender);
     }
 
     [Fact]
@@ -116,7 +195,8 @@ public class RoleDeletionCoordinatorTests
     public async Task SuccessfulRemediationRemovesDependenciesBeforeDeletingRole()
     {
         var contributor = new StubContributor([Dependency("connection-a", removesLastDefaultRole: true)]);
-        var (store, coordinator) = await CreateCoordinatorAsync(contributor);
+        var notificationSender = Substitute.For<INotificationSender>();
+        var (store, coordinator) = await CreateCoordinatorAsync(contributor, notificationSender);
         var impact = Assert.IsType<RoleDeletionInspectionResult.Success>(await coordinator.InspectAsync("workflow-user", Administrator())).Impact;
 
         var result = await coordinator.RemediateAndDeleteAsync(new(
@@ -131,6 +211,7 @@ public class RoleDeletionCoordinatorTests
         Assert.Equal(["connection-a"], deleted.ChangedOwnerIds);
         Assert.Null(await store.FindAsync(new() { Id = "workflow-user" }));
         Assert.Empty(contributor.Dependencies);
+        await AssertRoleDeletedNotificationAsync(notificationSender);
     }
 
     [Fact]
@@ -139,7 +220,8 @@ public class RoleDeletionCoordinatorTests
         var contributor = new StubContributor(
             [Dependency("connection-a"), Dependency("connection-b")],
             failAfterFirst: true);
-        var (store, coordinator) = await CreateCoordinatorAsync(contributor);
+        var notificationSender = Substitute.For<INotificationSender>();
+        var (store, coordinator) = await CreateCoordinatorAsync(contributor, notificationSender);
         var impact = Assert.IsType<RoleDeletionInspectionResult.Success>(await coordinator.InspectAsync("workflow-user", Administrator())).Impact;
 
         var result = await coordinator.RemediateAndDeleteAsync(new(
@@ -154,6 +236,7 @@ public class RoleDeletionCoordinatorTests
         Assert.Equal(["connection-a"], incomplete.ChangedOwnerIds);
         Assert.NotNull(await store.FindAsync(new() { Id = "workflow-user" }));
         Assert.Single(contributor.Dependencies);
+        await AssertNoRoleNotificationAsync(notificationSender);
     }
 
     [Fact]
@@ -288,14 +371,33 @@ public class RoleDeletionCoordinatorTests
         Assert.Single(contributor.Dependencies);
     }
 
-    private static async Task<(MemoryRoleStore Store, RoleDeletionCoordinator Coordinator)> CreateCoordinatorAsync(IRoleDeletionDependencyContributor contributor)
+    private static async Task<(MemoryRoleStore Store, RoleDeletionCoordinator Coordinator)> CreateCoordinatorAsync(
+        IRoleDeletionDependencyContributor contributor,
+        INotificationSender? notificationSender = null,
+        Func<MemoryRoleStore, IRoleStore>? storeDecorator = null)
     {
         var store = new MemoryRoleStore(new MemoryStore<Role>(), TestTenantAccessor.Default);
         await store.SaveAsync(new Role { Id = "workflow-user", Name = "Workflow user", Permissions = [] });
-        var roleProvider = new StoreBasedRoleProvider(store);
-        var coordinator = new RoleDeletionCoordinator(store, new RoleAuthorizationService(roleProvider, new PermissionEvaluator()), [contributor]);
+        var roleStore = storeDecorator?.Invoke(store) ?? store;
+        var roleProvider = new StoreBasedRoleProvider(roleStore);
+        var securityNotifier = new RoleSecurityNotifier(notificationSender ?? Substitute.For<INotificationSender>(), TestTenantAccessor.Default, new SystemClock());
+        var coordinator = new RoleDeletionCoordinator(roleStore, new RoleAuthorizationService(roleProvider, new PermissionEvaluator()), [contributor], securityNotifier);
         return (store, coordinator);
     }
+
+    private static async Task AssertRoleDeletedNotificationAsync(INotificationSender notificationSender) =>
+        await notificationSender.Received(1).SendAsync(
+            Arg.Is<RoleChanged>(notification =>
+                notification.Operation == "deleted" &&
+                notification.RoleId == "workflow-user" &&
+                notification.RoleName == "Workflow user" &&
+                notification.Permissions.Count == 0),
+            // The row is already gone by the time this is published, so a request that is cancelled or abandoned
+            // must not be able to silence it. An uncancellable token is how that is guaranteed.
+            Arg.Is<CancellationToken>(token => !token.CanBeCanceled));
+
+    private static async Task AssertNoRoleNotificationAsync(INotificationSender notificationSender) =>
+        await notificationSender.DidNotReceive().SendAsync(Arg.Any<RoleChanged>(), Arg.Any<CancellationToken>());
 
     private static ClaimsPrincipal Administrator() => new(new ClaimsIdentity([new Claim(PermissionNames.ClaimType, PermissionNames.All)]));
 
@@ -349,5 +451,41 @@ public class RoleDeletionCoordinatorTests
         }
 
         private string Version() => string.Join("|", Dependencies.Select(x => $"{x.OwnerId}:{x.ExpectedRevision}"));
+    }
+
+    /// <summary>Offers only <see cref="IRoleStore"/>, standing in for a store that predates atomic deletion.</summary>
+    private class LegacyRoleStore(MemoryRoleStore inner) : IRoleStore
+    {
+        protected MemoryRoleStore Inner { get; } = inner;
+
+        public Task AddAsync(Role role, CancellationToken cancellationToken = default) => Inner.AddAsync(role, cancellationToken);
+
+        public Task DeleteAsync(RoleFilter filter, CancellationToken cancellationToken = default) => Inner.DeleteAsync(filter, cancellationToken);
+
+        public Task SaveAsync(Role role, CancellationToken cancellationToken = default) => Inner.SaveAsync(role, cancellationToken);
+
+        public Task<Role?> FindAsync(RoleFilter filter, CancellationToken cancellationToken = default) => Inner.FindAsync(filter, cancellationToken);
+
+        public Task<IEnumerable<Role>> FindManyAsync(RoleFilter filter, CancellationToken cancellationToken = default) => Inner.FindManyAsync(filter, cancellationToken);
+    }
+
+    /// <summary>Finds the role but reports that the delete removed nothing, as the loser of a race would.</summary>
+    private sealed class RoleStoreThatDeletesNothing(MemoryRoleStore inner) : LegacyRoleStore(inner), IRoleStoreWithAtomicDelete
+    {
+        public Task<bool> TryDeleteAsync(string roleId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+    }
+
+    /// <summary>Holds every caller at the delete until they have all found the role, then lets them race for real.</summary>
+    private sealed class RoleStoreThatDeletesInLockstep(MemoryRoleStore inner, int callers) : LegacyRoleStore(inner), IRoleStoreWithAtomicDelete
+    {
+        private readonly Barrier _barrier = new(callers);
+
+        public Task<bool> TryDeleteAsync(string roleId, CancellationToken cancellationToken = default)
+        {
+            if (!_barrier.SignalAndWait(TimeSpan.FromSeconds(30)))
+                throw new TimeoutException("The concurrent deletions never met at the barrier.");
+
+            return Inner.TryDeleteAsync(roleId, cancellationToken);
+        }
     }
 }

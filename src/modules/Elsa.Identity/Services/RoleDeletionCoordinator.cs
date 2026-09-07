@@ -11,9 +11,11 @@ namespace Elsa.Identity.Services;
 public sealed class RoleDeletionCoordinator(
     IRoleStore roleStore,
     IRoleAuthorizationService roleAuthorizationService,
-    IEnumerable<IRoleDeletionDependencyContributor> contributors) : IRoleDeletionCoordinator
+    IEnumerable<IRoleDeletionDependencyContributor> contributors,
+    RoleSecurityNotifier securityNotifier) : IRoleDeletionCoordinator
 {
     private readonly IReadOnlyDictionary<string, IRoleDeletionDependencyContributor> _contributors = contributors.ToDictionary(x => x.Source, StringComparer.Ordinal);
+    private readonly IRoleStoreWithAtomicDelete? _atomicRoleStore = roleStore as IRoleStoreWithAtomicDelete;
 
     /// <inheritdoc />
     public async ValueTask<RoleDeletionInspectionResult> InspectAsync(string roleId, ClaimsPrincipal actor, CancellationToken cancellationToken = default)
@@ -41,8 +43,7 @@ public sealed class RoleDeletionCoordinator(
         if (!impact.CanDelete)
             return new RoleDeletionOperationResult.Blocked(impact);
 
-        await roleStore.DeleteAsync(new() { Id = roleId }, cancellationToken);
-        return new RoleDeletionOperationResult.Deleted([]);
+        return await DeleteRoleAsync(roleId, actor, [], cancellationToken);
     }
 
     /// <inheritdoc />
@@ -64,10 +65,7 @@ public sealed class RoleDeletionCoordinator(
             return new RoleDeletionOperationResult.ValidationFailed(impact, selectionError);
 
         if (impact.CanDelete)
-        {
-            await roleStore.DeleteAsync(new() { Id = command.RoleId }, cancellationToken);
-            return new RoleDeletionOperationResult.Deleted([]);
-        }
+            return await DeleteRoleAsync(command.RoleId, command.Actor, [], cancellationToken);
 
         var selectedDependencies = SelectEditableDependencies(impact, command.SelectedReferences);
         var replacementValidation = await ValidateReplacementRoleAsync(impact, command, selectedDependencies, cancellationToken);
@@ -133,8 +131,46 @@ public sealed class RoleDeletionCoordinator(
         if (!finalImpact.CanDelete)
             return new RoleDeletionOperationResult.Incomplete(finalImpact, changedOwnerIds.Distinct(StringComparer.Ordinal).ToArray(), "role_dependencies_remain");
 
-        await roleStore.DeleteAsync(new() { Id = command.RoleId }, cancellationToken);
-        return new RoleDeletionOperationResult.Deleted(changedOwnerIds.Distinct(StringComparer.Ordinal).ToArray());
+        return await DeleteRoleAsync(command.RoleId, command.Actor, changedOwnerIds.Distinct(StringComparer.Ordinal).ToArray(), cancellationToken);
+    }
+
+    /// <summary>
+    /// Deletes the role and publishes the deletion to security subscribers, reporting
+    /// <see cref="RoleDeletionOperationResult.NotFound"/> when this call did not remove it.
+    /// </summary>
+    /// <remarks>
+    /// The snapshot taken before the delete is what the notification carries, because the name and permissions a
+    /// reviewer needs are gone once the row is. The snapshot alone cannot decide whether to publish: a concurrent
+    /// request may remove the role between the read and the delete, and both callers would then report a deletion
+    /// they did not perform. Where the store implements <see cref="IRoleStoreWithAtomicDelete"/> the store's own
+    /// affected-row verdict decides instead, so exactly one racing caller publishes. Stores that do not implement
+    /// that capability keep the legacy find-then-delete path and publish once the delete returns, which preserves
+    /// the notification for third-party stores at the cost of not distinguishing concurrent callers.
+    /// </remarks>
+    private async ValueTask<RoleDeletionOperationResult> DeleteRoleAsync(
+        string roleId,
+        ClaimsPrincipal actor,
+        IReadOnlyCollection<string> changedOwnerIds,
+        CancellationToken cancellationToken)
+    {
+        var role = await roleStore.FindAsync(new() { Id = roleId }, cancellationToken);
+        if (role is null)
+            return new RoleDeletionOperationResult.NotFound();
+
+        if (_atomicRoleStore is not null)
+        {
+            if (!await _atomicRoleStore.TryDeleteAsync(roleId, cancellationToken))
+                return new RoleDeletionOperationResult.NotFound();
+        }
+        else
+        {
+            await roleStore.DeleteAsync(new() { Id = roleId }, cancellationToken);
+        }
+
+        // The role is already gone, so the notification is published with a token the request cannot cancel:
+        // a caller that walks away mid-request must not silence a deletion that has completed.
+        await securityNotifier.RoleChangedAsync(actor, "deleted", role.Id, role.Name, role.Permissions.ToArray(), CancellationToken.None);
+        return new RoleDeletionOperationResult.Deleted(changedOwnerIds);
     }
 
     private async ValueTask<IReadOnlyCollection<RoleDeletionDependencySnapshot>> InspectContributorsAsync(string roleId, CancellationToken cancellationToken)
